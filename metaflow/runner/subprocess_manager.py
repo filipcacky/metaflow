@@ -9,6 +9,8 @@ import tempfile
 import threading
 from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
+from .signal_manager import SignalManager
+
 
 def send_signals(pid, signal):
     # TODO: there's a race condition that new descendants might
@@ -78,20 +80,25 @@ class SubprocessManager(object):
     CommandManager objects, each of which manages an individual subprocess.
     """
 
-    def __init__(self):
+    def __init__(self, signal_manager: Optional[SignalManager] = None):
         self.commands: Dict[int, CommandManager] = {}
+        self.signal_manager = signal_manager or SignalManager()
 
         try:
+            asyncio.get_running_loop()
 
             async def handle_sigint():
                 await self._async_handle_sigint()
 
-            asyncio.get_running_loop().add_signal_handler(
-                signal.SIGINT, lambda: asyncio.create_task(handle_sigint())
-            )
+            self.signal_handler = lambda s, f: asyncio.create_task(handle_sigint())
 
         except RuntimeError:
-            signal.signal(signal.SIGINT, self._handle_sigint)
+            self.signal_handler = lambda s, f: self._handle_sigint(s, f)
+
+        self.signal_manager.add_signal_handler(signal.SIGINT, self.signal_handler)
+
+    def __del__(self):
+        self.cleanup()
 
     async def __aenter__(self) -> "SubprocessManager":
         return self
@@ -188,7 +195,8 @@ class SubprocessManager(object):
         return self.commands.get(pid, None)
 
     def cleanup(self) -> None:
-        """Clean up log files for all running subprocesses."""
+        """Clean up signal handler and log files for all running subprocesses."""
+        self.signal_manager.remove_signal_handler(signal.SIGINT, self.signal_handler)
 
         for v in self.commands.values():
             v.cleanup()
